@@ -30,6 +30,11 @@ GRACE_MIN     = 0
 EXCLUDE_ROLES = {1760491}    # Manager — salaried
 EXCLUDE_DEPTS = {545687}     # Cleaner — external vendor
 
+# DisciplineAgent Supabase (read-only) — drives the Status column. Optional:
+# if unset, the report still renders and everyone shows as Clean.
+DISC_URL = os.environ.get("DISCIPLINE_SUPABASE_URL", "").rstrip("/")
+DISC_KEY = os.environ.get("DISCIPLINE_SUPABASE_KEY", "").strip()
+
 ROLE_CATEGORY = {
     1760490: "foh", 1760495: "kit", 1760496: "kit", 1761419: "foh",
     1780081: "kit", 2045831: "foh", 2103857: "kit", 2215217: "foh",
@@ -46,6 +51,22 @@ def _get(path, params):
     })
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())
+
+
+def discipline_status():
+    """Map employee_name -> (step, step_label) from the DisciplineAgent board.
+    Returns {} if not configured or unreachable so the report still renders."""
+    if not DISC_URL or not DISC_KEY:
+        return {}
+    try:
+        url = f"{DISC_URL}/rest/v1/discipline_current?select=employee_name,step,step_label"
+        req = urllib.request.Request(url, headers={
+            "apikey": DISC_KEY, "Authorization": f"Bearer {DISC_KEY}"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode())
+        return {row["employee_name"]: (row.get("step", 0), row.get("step_label", "")) for row in data}
+    except Exception:
+        return {}
 
 
 def get_paginated(path, params):
@@ -203,6 +224,13 @@ def render_html(rows, frm, to, total_punches, months, attendance, name_cat):
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     summary = summarize(rows, attendance, name_cat)
 
+    status_map = discipline_status()
+
+    def status_cell(name):
+        _step, label = status_map.get(name, (0, "Clean"))
+        label = label or "Clean"
+        return f'<td><span class="st {label.lower()}">{label}</span></td>'
+
     def co_cell(v):  # call-off cell: dim zeros, red the non-zero counts
         return f'<td class="num co">{v}</td>' if v else '<td class="num zero">0</td>'
 
@@ -216,12 +244,13 @@ def render_html(rows, frm, to, total_punches, months, attendance, name_cat):
     sum_trs = "\n".join(
         f'<tr><td>{html.escape(s["name"])}</td>'
         f'<td><span class="pill {s["cat"].lower()}">{s["cat"]}</span></td>'
+        + status_cell(s["name"])
         + late_cells(s)
         + co_cell(s["sick"]) + co_cell(s["no_show"])
         + co_cell(s["called_off"]) + co_cell(s["called_in"])
         + '</tr>'
         for s in summary
-    ) or '<tr><td colspan="9" class="none">No attendance issues in this window. 🎉</td></tr>'
+    ) or '<tr><td colspan="10" class="none">No attendance issues in this window. 🎉</td></tr>'
 
     tot_ns = sum(s["no_show"] for s in summary)
     tot_sick = sum(s["sick"] for s in summary)
@@ -264,6 +293,10 @@ def render_html(rows, frm, to, total_punches, months, attendance, name_cat):
  .pill{{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}}
  .pill.foh{{background:#1e3a5f;color:#7db5ff}} .pill.kit{{background:#5f3a1e;color:#ffb87d}}
  .pill.\\?{{background:#333;color:#aaa}}
+ .st{{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap}}
+ .st.clean{{background:#16331f;color:#79e0a0}} .st.verbal{{background:#3a3a1e;color:#ffe07d}}
+ .st.written{{background:#3a2e1e;color:#ffc77d}} .st.final{{background:#3a261e;color:#ff9d7d}}
+ .st.suspension{{background:#3a1e1e;color:#ff6b6b}} .st.termination{{background:#5a1414;color:#ff5252}}
  .foot{{color:#6b7280;font-size:12px;margin-top:18px}}
 </style></head><body><div class="wrap">
 <h1>Tardiness Report — On Par Bar</h1>
@@ -279,7 +312,7 @@ def render_html(rows, frm, to, total_punches, months, attendance, name_cat):
 
 <h2>By employee</h2>
 <table>
- <tr><th>Employee</th><th>Dept</th><th class="num">Late arrivals</th><th class="num">Avg late</th><th class="num">Worst</th><th class="num">Sick</th><th class="num">No-show</th><th class="num">Called off</th><th class="num">Called in</th></tr>
+ <tr><th>Employee</th><th>Dept</th><th>Status</th><th class="num">Late arrivals</th><th class="num">Avg late</th><th class="num">Worst</th><th class="num">Sick</th><th class="num">No-show</th><th class="num">Called off</th><th class="num">Called in</th></tr>
  {sum_trs}
 </table>
 
