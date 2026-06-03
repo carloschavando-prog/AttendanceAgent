@@ -97,6 +97,9 @@ def build(frm, to):
     users = get_paginated(f"/v2/company/{CO}/users", {"limit": 200})
     names = {u["id"]: f'{u.get("first_name","").strip()} {u.get("last_name","").strip()}'.strip()
              for u in users}
+    # Only active employees — terminated staff are excluded from the whole report.
+    active_ids = {u["id"] for u in users if u.get("active")}
+    active_names = {names[uid] for uid in active_ids}
 
     # earliest punch per (user, shift) = arrival
     arrival = {}
@@ -112,6 +115,8 @@ def build(frm, to):
 
     rows = []
     for p in arrival.values():
+        if p.get("user_id") not in active_ids:
+            continue
         if p.get("role_id") in EXCLUDE_ROLES or p.get("department_id") in EXCLUDE_DEPTS:
             continue
         actual = parse_ts(p.get("clocked_in"))
@@ -136,7 +141,7 @@ def build(frm, to):
     # for the Dept column of staff who have call-offs but no late arrivals).
     uid_roles = defaultdict(Counter)
     for s in shifts:
-        if s.get("role_id") in ROLE_CATEGORY:
+        if s.get("role_id") in ROLE_CATEGORY and s.get("user_id") in active_ids:
             uid_roles[s.get("user_id")][ROLE_CATEGORY[s["role_id"]]] += 1
     name_cat = {names.get(uid, f"User {uid}"): c.most_common(1)[0][0].upper()
                 for uid, c in uid_roles.items()}
@@ -149,6 +154,8 @@ def build(frm, to):
         rep = _get(f"/v2/company/{CO}/reports/attendance",
                    {"location_id": LOC, "start_date": frm, "end_date": to}).get("data", [])
         for r in rep:
+            if r["name"] not in active_names:
+                continue   # safety: report is already active-only, but enforce it
             attendance[r["name"]] = {k: r.get(k, 0) or 0
                                      for k in ("sick", "no_show", "called_off", "called_in")}
     except Exception:
