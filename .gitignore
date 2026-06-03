@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.template
+.vercel
+__pycache__/
+*.pyc
+*.html
+.DS_Store

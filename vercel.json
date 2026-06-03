@@ -1,0 +1,11 @@
+{
+  "crons": [
+    { "path": "/api/cron", "schedule": "0 9 * * *" }
+  ],
+  "functions": {
+    "api/*.py": { "maxDuration": 60 }
+  },
+  "rewrites": [
+    { "source": "/", "destination": "/api/report" }
+  ]
+}
