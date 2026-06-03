@@ -19,7 +19,7 @@ class handler(BaseHTTPRequestHandler):
             self.send_response(401)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"Unauthorized — append ?key=YOUR_KEY")
+            self.wfile.write(b"Unauthorized - append ?key=YOUR_KEY")
             return
         try:
             months = int(qs.get("months", ["6"])[0])
