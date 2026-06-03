@@ -160,13 +160,15 @@ def render_html(rows, frm, to, total_punches, months):
         for s in summary
     ) or '<tr><td colspan="5" class="none">No late arrivals in this window. 🎉</td></tr>'
 
+    # Detail table grouped by staff member (alphabetical), chronological within.
+    detail = sorted(rows, key=lambda r: (r["name"].lower(), r["_sort"]))
     trs = "\n".join(
         f'<tr class="{ "bad" if r["late"]>=15 else "warn" }">'
         f'<td>{html.escape(r["name"])}</td>'
         f'<td><span class="pill {r["cat"].lower()}">{r["cat"]}</span></td>'
         f'<td>{r["date"]}</td><td>{r["sched"]}</td><td>{r["actual"]}</td>'
         f'<td class="late num">{r["late"]} min</td></tr>'
-        for r in rows
+        for r in detail
     ) or '<tr><td colspan="6" class="none">No late arrivals in this window. 🎉</td></tr>'
 
     worst = max((r["late"] for r in rows), default=0)
