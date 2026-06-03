@@ -17,7 +17,7 @@ import html
 import calendar
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import defaultdict, Counter
 from datetime import date, datetime, timezone, timedelta
 
 # ---- Config (env-driven; safe defaults) ------------------------------------
@@ -131,34 +131,94 @@ def build(frm, to):
             "_sort": actual,
         })
     rows.sort(key=lambda r: (-r["late"], r["_sort"]))
-    return rows, len(punches)
+
+    # Per-employee department, inferred from the roles they're scheduled in (used
+    # for the Dept column of staff who have call-offs but no late arrivals).
+    uid_roles = defaultdict(Counter)
+    for s in shifts:
+        if s.get("role_id") in ROLE_CATEGORY:
+            uid_roles[s.get("user_id")][ROLE_CATEGORY[s["role_id"]]] += 1
+    name_cat = {names.get(uid, f"User {uid}"): c.most_common(1)[0][0].upper()
+                for uid, c in uid_roles.items()}
+
+    # Call-offs come straight from the official 7Shifts Attendance Report so the
+    # numbers match what staff see in the UI (raw shift attendance_status counts
+    # higher — the report excludes drafts/unworked shifts via internal logic).
+    attendance = {}
+    try:
+        rep = _get(f"/v2/company/{CO}/reports/attendance",
+                   {"location_id": LOC, "start_date": frm, "end_date": to}).get("data", [])
+        for r in rep:
+            attendance[r["name"]] = {k: r.get(k, 0) or 0
+                                     for k in ("sick", "no_show", "called_off", "called_in")}
+    except Exception:
+        attendance = {}
+
+    return rows, len(punches), attendance, name_cat
 
 
-def summarize(rows):
-    agg = defaultdict(lambda: {"cat": "?", "count": 0, "total": 0, "worst": 0})
+def summarize(rows, attendance, name_cat):
+    """One row per employee who has a late arrival OR any call-off."""
+    agg = {}
+
+    def slot(name):
+        if name not in agg:
+            agg[name] = {"name": name, "cat": name_cat.get(name, "?"),
+                         "count": 0, "total": 0, "worst": 0,
+                         "sick": 0, "no_show": 0, "called_off": 0, "called_in": 0}
+        return agg[name]
+
     for r in rows:
-        a = agg[r["name"]]
-        a["cat"] = r["cat"]
+        a = slot(r["name"])
+        a["cat"] = r["cat"]              # role from the actual late punch is most precise
         a["count"] += 1
         a["total"] += r["late"]
         a["worst"] = max(a["worst"], r["late"])
-    out = [{"name": n, **v, "avg": round(v["total"] / v["count"])} for n, v in agg.items()]
-    out.sort(key=lambda s: (-s["count"], -s["total"]))
+
+    for name, co in attendance.items():
+        if any(co.values()):
+            a = slot(name)
+            for k in ("sick", "no_show", "called_off", "called_in"):
+                a[k] += co[k]
+
+    out = []
+    for a in agg.values():
+        a["avg"] = round(a["total"] / a["count"]) if a["count"] else 0
+        a["calloffs"] = a["sick"] + a["no_show"] + a["called_off"] + a["called_in"]
+        out.append(a)
+    # Keep the approved late-arrival ranking on top; call-off-only staff follow,
+    # ordered by how many call-offs they have.
+    out.sort(key=lambda s: (-s["count"], -s["calloffs"], -s["total"]))
     return out
 
 
-def render_html(rows, frm, to, total_punches, months):
+def render_html(rows, frm, to, total_punches, months, attendance, name_cat):
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    summary = summarize(rows)
+    summary = summarize(rows, attendance, name_cat)
+
+    def co_cell(v):  # call-off cell: dim zeros, red the non-zero counts
+        return f'<td class="num co">{v}</td>' if v else '<td class="num zero">0</td>'
+
+    def late_cells(s):
+        if not s["count"]:
+            return '<td class="num zero">0</td><td class="num zero">—</td><td class="num zero">—</td>'
+        return (f'<td class="num">{s["count"]}</td>'
+                f'<td class="num">{s["avg"]} min</td>'
+                f'<td class="num late {"bad" if s["worst"]>=15 else "warn"}">{s["worst"]} min</td>')
 
     sum_trs = "\n".join(
         f'<tr><td>{html.escape(s["name"])}</td>'
         f'<td><span class="pill {s["cat"].lower()}">{s["cat"]}</span></td>'
-        f'<td class="num">{s["count"]}</td>'
-        f'<td class="num">{s["avg"]} min</td>'
-        f'<td class="num late {"bad" if s["worst"]>=15 else "warn"}">{s["worst"]} min</td></tr>'
+        + late_cells(s)
+        + co_cell(s["sick"]) + co_cell(s["no_show"])
+        + co_cell(s["called_off"]) + co_cell(s["called_in"])
+        + '</tr>'
         for s in summary
-    ) or '<tr><td colspan="5" class="none">No late arrivals in this window. 🎉</td></tr>'
+    ) or '<tr><td colspan="9" class="none">No attendance issues in this window. 🎉</td></tr>'
+
+    tot_ns = sum(s["no_show"] for s in summary)
+    tot_sick = sum(s["sick"] for s in summary)
+    tot_co = sum(s["called_off"] + s["called_in"] for s in summary)
 
     # Detail table grouped by staff member (alphabetical), chronological within.
     detail = sorted(rows, key=lambda r: (r["name"].lower(), r["_sort"]))
@@ -191,6 +251,7 @@ def render_html(rows, frm, to, total_punches, months):
  tr:last-child td{{border-bottom:none}}
  .num{{text-align:right}}
  .late{{font-weight:700}}
+ .co{{font-weight:700;color:#ff6b6b}} .zero{{color:#5b616b}}
  .bad.late,tr.bad .late{{color:#ff6b6b}} .warn.late,tr.warn .late{{color:#ffb454}}
  .none{{text-align:center;color:#9aa0a6;padding:28px}}
  .pill{{font-size:11px;font-weight:700;padding:2px 8px;border-radius:20px}}
@@ -202,14 +263,16 @@ def render_html(rows, frm, to, total_punches, months):
 <div class="sub">Rolling {months}-month window: <b>{frm}</b> → <b>{to}</b> · generated {generated}</div>
 <div class="cards">
  <div class="card"><div class="n">{len(rows)}</div><div class="l">Late arrivals</div></div>
- <div class="card"><div class="n">{len(summary)}</div><div class="l">Employees late</div></div>
+ <div class="card"><div class="n">{tot_ns}</div><div class="l">No-shows</div></div>
+ <div class="card"><div class="n">{tot_sick}</div><div class="l">Sick days</div></div>
+ <div class="card"><div class="n">{tot_co}</div><div class="l">Called off / in</div></div>
  <div class="card"><div class="n">{worst}</div><div class="l">Worst (min late)</div></div>
  <div class="card"><div class="n">{total_punches}</div><div class="l">Punches reviewed</div></div>
 </div>
 
 <h2>By employee</h2>
 <table>
- <tr><th>Employee</th><th>Dept</th><th class="num">Late arrivals</th><th class="num">Avg late</th><th class="num">Worst</th></tr>
+ <tr><th>Employee</th><th>Dept</th><th class="num">Late arrivals</th><th class="num">Avg late</th><th class="num">Worst</th><th class="num">Sick</th><th class="num">No-show</th><th class="num">Called off</th><th class="num">Called in</th></tr>
  {sum_trs}
 </table>
 
@@ -218,14 +281,17 @@ def render_html(rows, frm, to, total_punches, months):
  <tr><th>Employee</th><th>Dept</th><th>Date (scheduled)</th><th>Sched. in</th><th>Actual in</th><th class="num">Late by</th></tr>
  {trs}
 </table>
-<div class="foot">Tardiness = actual punch-in − scheduled punch-in (earliest punch per shift only). Grace: {GRACE_MIN} min ·
- Manager (salaried) &amp; Cleaner excluded · ≥15 min shown in red.</div>
+<div class="foot">Late arrivals: actual − scheduled punch-in (earliest punch per shift), Manager &amp; Cleaner excluded.
+ Sick / No-show / Called off / Called in come from the 7Shifts Attendance Report (the report's Late column is omitted — covered above). ≥15 min &amp; any call-off shown in red.</div>
 </div></body></html>"""
 
 
 def generate(months=6):
     frm, to = rolling_window(months)
-    rows, total = build(frm, to)
-    return render_html(rows, frm, to, total, months), {"from": frm, "to": to,
-                                                        "late_arrivals": len(rows),
-                                                        "punches_reviewed": total}
+    rows, total, attendance, name_cat = build(frm, to)
+    stats = {"from": frm, "to": to, "late_arrivals": len(rows), "punches_reviewed": total,
+             "no_shows": sum(c["no_show"] for c in attendance.values()),
+             "sick": sum(c["sick"] for c in attendance.values()),
+             "called_off": sum(c["called_off"] for c in attendance.values()),
+             "called_in": sum(c["called_in"] for c in attendance.values())}
+    return render_html(rows, frm, to, total, months, attendance, name_cat), stats
