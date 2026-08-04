@@ -29,7 +29,9 @@ class handler(BaseHTTPRequestHandler):
             html_out, _ = core.generate(months)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "s-maxage=900, stale-while-revalidate=3600")
+            # Short edge cache so disciplinary edits reflect quickly; stale-while-
+            # revalidate keeps loads instant (background refresh, no 6-mo pull wait).
+            self.send_header("Cache-Control", "s-maxage=30, stale-while-revalidate=120")
             self.end_headers()
             self.wfile.write(html_out.encode("utf-8"))
         except Exception as e:  # noqa: BLE001 — surface the error in the browser
